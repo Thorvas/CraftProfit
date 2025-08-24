@@ -55,14 +55,16 @@ local function SafeItemName(itemID, fallbackLink)
   return fallbackLink or (itemID and ("item:" .. itemID) or "?")
 end
 
--- Try to obtain the vendor purchase price for an item.  If the item is sold
--- by a vendor the price is embedded in the item info table.  For our purposes
--- we simply return that value (in copper) or nil if not available.
+-- by a vendor the price is embedded in the item info table.  The game stores
+-- the amount the vendor pays when you sell the item to them (the "sell" price),
+-- while the purchase price is typically double that.  We approximate the cost
+-- to buy from a vendor as sellPrice * 2 and return nil if the item has no sell
+-- price information.
 local function GetVendorPrice(itemID)
   if not itemID then return nil end
-  local vendorPrice = select(11, GetItemInfo(itemID))
-  if vendorPrice and vendorPrice > 0 then
-    return vendorPrice
+  local sellPrice = select(11, GetItemInfo(itemID))
+  if sellPrice and sellPrice > 0 then
+    return sellPrice * 2
   end
   return nil
 end
@@ -89,21 +91,22 @@ local function RecordAuctionPrice(itemLink, buyoutTotal, stackCount)
   if unitPrice <= 0 then return end
   
   local rec = AHProfProfitDB.itemPrices[itemID]
-  local isNewMin = false
-  
-  if not rec or unitPrice < (rec.minBuyout or math.huge) then
-    AHProfProfitDB.itemPrices[itemID] = { 
-      minBuyout = unitPrice, 
-      lastSeen = time() 
+  local isNew = false
+
+  if not rec or rec.source == "vendor" or unitPrice < (rec.minBuyout or math.huge) then
+    AHProfProfitDB.itemPrices[itemID] = {
+      minBuyout = unitPrice,
+      lastSeen = time(),
+      source = "auction"
     }
-    isNewMin = true
-    Debug("NEW MIN price for itemID " .. itemID .. ": " .. FormatMoney(unitPrice))
+    isNew = true
+    Debug("Recorded auction price for itemID " .. itemID .. ": " .. FormatMoney(unitPrice))
   else
     rec.lastSeen = time()
     Debug("Updated price for itemID " .. itemID .. ": " .. FormatMoney(unitPrice))
   end
-  
-  return isNewMin
+
+  return isNew
 end
 
 ------------------------------------------------------------
@@ -224,30 +227,41 @@ AHPP._pending = false
 local function BuildNeededItems()
   local need = {}
   for _, recipe in pairs(AHProfProfitDB.recipes or {}) do
-    if recipe.itemID then need[recipe.itemID] = true end
+    if recipe.itemID then
+      need[recipe.itemID] = need[recipe.itemID] or {}
+      need[recipe.itemID].isRecipe = true
+    end
     for _, r in ipairs(recipe.reagents or {}) do
-      if r.itemID then need[r.itemID] = true end
+      if r.itemID then
+        need[r.itemID] = need[r.itemID] or {}
+        need[r.itemID].isReagent = true
+      end
     end
   end
+
   local q = {}
-  for id in pairs(need) do
+  for id, info in pairs(need) do
     local name = GetItemInfo(id)
-    local vendorPrice = GetVendorPrice(id)
-    if vendorPrice then
-      local rec = AHProfProfitDB.itemPrices[id]
-      if not rec or vendorPrice < (rec.minBuyout or math.huge) then
-        AHProfProfitDB.itemPrices[id] = { minBuyout = vendorPrice, lastSeen = time() }
+
+    if info.isReagent then
+      local vendorPrice = GetVendorPrice(id)
+      if vendorPrice then
+        local rec = AHProfProfitDB.itemPrices[id]
+        if not rec or rec.source == "vendor" or vendorPrice < (rec.minBuyout or math.huge) then
+          AHProfProfitDB.itemPrices[id] = { minBuyout = vendorPrice, lastSeen = time(), source = "vendor" }
+        end
+        Debug("Using vendor price for '" .. (name or ("ID:"..id)) .. "'")
       end
-      Debug("Using vendor price for '" .. (name or ("ID:"..id)) .. "'")
-    else
-      if name then
-        Debug("Added to scan queue: '" .. name .. "' (ID: " .. id .. ")")
-      else
-        Debug("Added to scan queue: ID " .. id .. " (name unknown)")
-      end
-      table.insert(q, { itemID = id, name = name, page = 0, retries = 0, searchAttempt = 1 })
     end
+
+    if name then
+      Debug("Added to scan queue: '" .. name .. "' (ID: " .. id .. ")")
+    else
+      Debug("Added to scan queue: ID " .. id .. " (name unknown)")
+    end
+    table.insert(q, { itemID = id, name = name, page = 0, retries = 0, searchAttempt = 1 })
   end
+
   table.sort(q, function(a,b) return (a.name or ("item:"..a.itemID)) < (b.name or ("item:"..b.itemID)) end)
   return q
 end
@@ -589,10 +603,11 @@ local function ComputeRecipeRow(recipe)
     local vendorPrice = GetVendorPrice(itemID)
     if vendorPrice then
       itemPrice = vendorPrice
-      local rec = AHProfProfitDB.itemPrices[itemID]
-      if not rec or vendorPrice < (rec.minBuyout or math.huge) then
-        AHProfProfitDB.itemPrices[itemID] = { minBuyout = vendorPrice, lastSeen = time() }
-      end
+      AHProfProfitDB.itemPrices[itemID] = {
+        minBuyout = vendorPrice,
+        lastSeen = time(),
+        source = "vendor"
+      }
     end
   end
 
@@ -607,10 +622,11 @@ local function ComputeRecipeRow(recipe)
       local vendorPrice = GetVendorPrice(mat.itemID)
       if vendorPrice then
         price = vendorPrice
-        local rec = AHProfProfitDB.itemPrices[mat.itemID]
-        if not rec or vendorPrice < (rec.minBuyout or math.huge) then
-          AHProfProfitDB.itemPrices[mat.itemID] = { minBuyout = vendorPrice, lastSeen = time() }
-        end
+        AHProfProfitDB.itemPrices[mat.itemID] = {
+          minBuyout = vendorPrice,
+          lastSeen = time(),
+          source = "vendor"
+        }
       end
     end
     if price then
