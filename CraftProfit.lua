@@ -55,6 +55,18 @@ local function SafeItemName(itemID, fallbackLink)
   return fallbackLink or (itemID and ("item:" .. itemID) or "?")
 end
 
+-- Try to obtain the vendor purchase price for an item.  If the item is sold
+-- by a vendor the price is embedded in the item info table.  For our purposes
+-- we simply return that value (in copper) or nil if not available.
+local function GetVendorPrice(itemID)
+  if not itemID then return nil end
+  local vendorPrice = select(11, GetItemInfo(itemID))
+  if vendorPrice and vendorPrice > 0 then
+    return vendorPrice
+  end
+  return nil
+end
+
 ------------------------------------------------------------
 -- Auction data storage (historical min unit buyout)
 ------------------------------------------------------------
@@ -220,12 +232,21 @@ local function BuildNeededItems()
   local q = {}
   for id in pairs(need) do
     local name = GetItemInfo(id)
-    if name then
-      Debug("Added to scan queue: '" .. name .. "' (ID: " .. id .. ")")
+    local vendorPrice = GetVendorPrice(id)
+    if vendorPrice then
+      local rec = AHProfProfitDB.itemPrices[id]
+      if not rec or vendorPrice < (rec.minBuyout or math.huge) then
+        AHProfProfitDB.itemPrices[id] = { minBuyout = vendorPrice, lastSeen = time() }
+      end
+      Debug("Using vendor price for '" .. (name or ("ID:"..id)) .. "'")
     else
-      Debug("Added to scan queue: ID " .. id .. " (name unknown)")
+      if name then
+        Debug("Added to scan queue: '" .. name .. "' (ID: " .. id .. ")")
+      else
+        Debug("Added to scan queue: ID " .. id .. " (name unknown)")
+      end
+      table.insert(q, { itemID = id, name = name, page = 0, retries = 0, searchAttempt = 1 })
     end
-    table.insert(q, { itemID = id, name = name, page = 0, retries = 0, searchAttempt = 1 })
   end
   table.sort(q, function(a,b) return (a.name or ("item:"..a.itemID)) < (b.name or ("item:"..b.itemID)) end)
   return q
@@ -564,6 +585,16 @@ local function ComputeRecipeRow(recipe)
 
   local itemRec = AHProfProfitDB.itemPrices[itemID]
   local itemPrice = itemRec and itemRec.minBuyout or nil
+  if not itemPrice then
+    local vendorPrice = GetVendorPrice(itemID)
+    if vendorPrice then
+      itemPrice = vendorPrice
+      local rec = AHProfProfitDB.itemPrices[itemID]
+      if not rec or vendorPrice < (rec.minBuyout or math.huge) then
+        AHProfProfitDB.itemPrices[itemID] = { minBuyout = vendorPrice, lastSeen = time() }
+      end
+    end
+  end
 
   local matsCost = 0
   local missing = (itemPrice == nil)
@@ -571,10 +602,21 @@ local function ComputeRecipeRow(recipe)
 
   for _, mat in ipairs(recipe.reagents or {}) do
     local priceRec = AHProfProfitDB.itemPrices[mat.itemID]
-    if not priceRec or not priceRec.minBuyout then
-      hasMissingMats = true
+    local price = priceRec and priceRec.minBuyout
+    if not price then
+      local vendorPrice = GetVendorPrice(mat.itemID)
+      if vendorPrice then
+        price = vendorPrice
+        local rec = AHProfProfitDB.itemPrices[mat.itemID]
+        if not rec or vendorPrice < (rec.minBuyout or math.huge) then
+          AHProfProfitDB.itemPrices[mat.itemID] = { minBuyout = vendorPrice, lastSeen = time() }
+        end
+      end
+    end
+    if price then
+      matsCost = matsCost + (price * (mat.count or 1))
     else
-      matsCost = matsCost + (priceRec.minBuyout * (mat.count or 1))
+      hasMissingMats = true
     end
   end
 
