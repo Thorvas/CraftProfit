@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: CraftProfit
+## Notes: AH & TradeSkill scanner with profit table by historical percentile.
+## Author: You
+## Version: 0.1.0
+## SavedVariables: CraftProfitDB
+
+CraftProfit.lua
